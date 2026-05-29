@@ -1,0 +1,769 @@
+---
+title: "Evaluacija e-kolegija temeljem vanjskih podataka"
+subtitle: "Analiza akademskih performansi studenata na SABER11 i SABER-PRO datasetu"
+author: "Antonio Labinjan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Uvod
+
+Ovaj dokument analizira javno dostupan skup podataka o akademskim rezultatima studenata. Dataset sadrži rezultate iz srednjoškolskog ispita SABER11, rezultate sveučilišnog ispita SABER-PRO te demografske i socioekonomske varijable.
+
+Cilj analize je:
+
+- opisati distribuciju rezultata,
+- usporediti srednjoškolske i sveučilišne rezultate,
+- analizirati povezanost akademskog uspjeha i socioekonomskog konteksta,
+- primijeniti PCA radi smanjenja dimenzionalnosti,
+- grupirati studente u profile pomoću k-means klasterizacije,
+- izvesti preporuke za e-kolegij i adaptivno učenje.
+
+# Učitavanje paketa i podataka
+
+```{r packages}
+# Ako neki paket nije instaliran, jednom ručno pokreni:
+# install.packages(c("readxl", "tidyverse", "ggplot2", "factoextra", "cluster", "corrplot", "gridExtra", "scales", "knitr"))
+
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(factoextra)
+library(cluster)
+library(corrplot)
+library(gridExtra)
+library(scales)
+library(knitr)
+```
+
+```{r load-data}
+DATA_PATH <- "/home/antonio/Downloads/83tcx8psxv-1/data_academic_performance.xlsx"
+OUTPUT_DIR <- "output_grafovi"
+
+dir.create(OUTPUT_DIR, showWarnings = FALSE)
+
+df_raw <- read_excel(DATA_PATH, sheet = 1, .name_repair = "unique")
+
+df_raw <- df_raw %>%
+  select(where(~ !all(is.na(.x))))
+
+cat("Dimenzije dataseta:", nrow(df_raw), "redaka x", ncol(df_raw), "stupaca\n")
+cat("Nazivi stupaca:\n")
+print(names(df_raw))
+```
+
+# Priprema i čišćenje podataka
+
+```{r clean-data}
+s11_vars <- c("MAT_S11", "CR_S11", "CC_S11", "BIO_S11", "ENG_S11")
+pro_vars <- c("QR_PRO", "CR_PRO", "CC_PRO", "ENG_PRO", "WC_PRO", "FEP_PRO")
+score_vars <- c(s11_vars, pro_vars)
+
+context_vars <- c(
+  "GENDER", "STRATUM", "REVENUE", "SCHOOL_TYPE", "SCHOOL_NAT",
+  "UNIVERSITY", "ACADEMIC_PROGRAM", "PERCENTILE", "QUARTILE",
+  "G_SC", "2ND_DECILE", "SEL", "SEL_IHE"
+)
+
+asset_vars <- c(
+  "INTERNET", "TV", "COMPUTER", "WASHING_MCH", "MIC_OVEN",
+  "CAR", "DVD", "FRESH", "PHONE", "MOBILE"
+)
+
+required_vars <- c(score_vars, "PERCENTILE")
+missing_required <- setdiff(required_vars, names(df_raw))
+
+if (length(missing_required) > 0) {
+  stop(paste("Nedostaju obavezni stupci:", paste(missing_required, collapse = ", ")))
+}
+
+df <- df_raw %>%
+  mutate(across(where(is.character), ~ str_squish(.x))) %>%
+  mutate(across(all_of(score_vars), as.numeric)) %>%
+  mutate(PERCENTILE = as.numeric(PERCENTILE)) %>%
+  select(any_of(c(score_vars, context_vars, asset_vars, "COD_S11", "Cod_SPro"))) %>%
+  drop_na(all_of(score_vars)) %>%
+  mutate(
+    GENDER = factor(GENDER),
+    STRATUM = na_if(STRATUM, "0"),
+    STRATUM = factor(
+      STRATUM,
+      levels = c("Stratum 1", "Stratum 2", "Stratum 3", "Stratum 4", "Stratum 5", "Stratum 6"),
+      ordered = TRUE
+    ),
+    SCHOOL_TYPE = factor(SCHOOL_TYPE),
+    SCHOOL_NAT = factor(SCHOOL_NAT),
+    REVENUE = factor(REVENUE)
+  )
+
+if (all(asset_vars %in% names(df))) {
+  df <- df %>%
+    mutate(asset_count = rowSums(across(all_of(asset_vars), ~ .x == "Yes"), na.rm = TRUE))
+}
+
+df <- df %>%
+  mutate(
+    s11_avg = rowMeans(across(all_of(s11_vars)), na.rm = TRUE),
+    pro_avg_0_100 = rowMeans(across(all_of(c("QR_PRO", "CR_PRO", "CC_PRO", "ENG_PRO", "WC_PRO"))), na.rm = TRUE),
+    pro_global_scaled = scales::rescale(FEP_PRO, to = c(0, 100)),
+    academic_index = rowMeans(across(c(s11_avg, pro_avg_0_100, pro_global_scaled)), na.rm = TRUE)
+  )
+
+cat("Nakon čišćenja:", nrow(df), "studenata\n")
+cat("Broj missing vrijednosti u score varijablama:", sum(is.na(df[score_vars])), "\n")
+```
+
+# Pregled dataseta
+
+```{r data-overview}
+overview <- tibble(
+  metrika = c(
+    "Broj studenata",
+    "Broj analiziranih akademskih varijabli",
+    "Prosjek SABER11",
+    "Prosjek SABER-PRO 0-100",
+    "Prosječni percentil",
+    "Minimalni percentil",
+    "Maksimalni percentil"
+  ),
+  vrijednost = c(
+    nrow(df),
+    length(score_vars),
+    round(mean(df$s11_avg, na.rm = TRUE), 1),
+    round(mean(df$pro_avg_0_100, na.rm = TRUE), 1),
+    round(mean(df$PERCENTILE, na.rm = TRUE), 1),
+    min(df$PERCENTILE, na.rm = TRUE),
+    max(df$PERCENTILE, na.rm = TRUE)
+  )
+)
+
+kable(overview, caption = "Osnovni pregled dataseta")
+```
+
+# Deskriptivna statistika
+
+```{r descriptive-statistics}
+desc_stats <- df %>%
+  select(all_of(score_vars), PERCENTILE, s11_avg, pro_avg_0_100, academic_index) %>%
+  summarise(across(everything(), list(
+    min = ~ min(.x, na.rm = TRUE),
+    mean = ~ round(mean(.x, na.rm = TRUE), 2),
+    median = ~ round(median(.x, na.rm = TRUE), 2),
+    sd = ~ round(sd(.x, na.rm = TRUE), 2),
+    max = ~ max(.x, na.rm = TRUE)
+  ))) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("varijabla", "statistika"),
+    names_sep = "_(?=[^_]+$)"
+  ) %>%
+  pivot_wider(names_from = statistika, values_from = value)
+
+kable(desc_stats, caption = "Deskriptivna statistika akademskih varijabli")
+```
+
+```{r descriptive-interpretation, results='asis'}
+cat("Prosječni rezultat iz SABER11 predmeta iznosi ", round(mean(df$s11_avg), 1), ". ", sep = "")
+cat("Prosječni SABER-PRO rezultat na skali 0-100 iznosi ", round(mean(df$pro_avg_0_100), 1), ". ", sep = "")
+cat("Prosječni percentil studenata iznosi ", round(mean(df$PERCENTILE), 1), ", što pokazuje da uzorak nije koncentriran samo oko slabijih rezultata.\n", sep = "")
+```
+
+# Distribucija rezultata
+
+```{r score-distributions}
+df_long_s11 <- df %>%
+  select(all_of(s11_vars)) %>%
+  pivot_longer(everything(), names_to = "predmet", values_to = "rezultat") %>%
+  mutate(
+    ispit = "SABER11 - srednja škola",
+    predmet = recode(
+      predmet,
+      MAT_S11 = "Matematika",
+      CR_S11 = "Kritičko čitanje",
+      CC_S11 = "Građanske kompetencije",
+      BIO_S11 = "Biologija",
+      ENG_S11 = "Engleski"
+    )
+  )
+
+df_long_pro <- df %>%
+  select(QR_PRO, CR_PRO, CC_PRO, ENG_PRO, WC_PRO) %>%
+  pivot_longer(everything(), names_to = "predmet", values_to = "rezultat") %>%
+  mutate(
+    ispit = "SABER-PRO - sveučilište",
+    predmet = recode(
+      predmet,
+      QR_PRO = "Kvantitativno rasuđivanje",
+      CR_PRO = "Kritičko čitanje",
+      CC_PRO = "Građanske kompetencije",
+      ENG_PRO = "Engleski",
+      WC_PRO = "Pisanje"
+    )
+  )
+
+df_long_scores <- bind_rows(df_long_s11, df_long_pro)
+
+p_distribucije <- ggplot(df_long_scores, aes(x = rezultat, fill = ispit)) +
+  geom_histogram(bins = 30, alpha = 0.75, color = "white") +
+  facet_grid(ispit ~ predmet, scales = "free_x") +
+  scale_fill_manual(values = c("#2E86AB", "#F18F01")) +
+  labs(
+    title = "Distribucija rezultata na SABER11 i SABER-PRO ispitima",
+    subtitle = "Usporedba srednjoškolskih i sveučilišnih akademskih rezultata",
+    x = "Rezultat",
+    y = "Broj studenata",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 9),
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_distribucije)
+ggsave(file.path(OUTPUT_DIR, "01_distribucije_rezultata.png"), p_distribucije, width = 14, height = 7, dpi = 150)
+```
+
+# Usporedba srednjoškolskog i sveučilišnog uspjeha
+
+```{r s11-vs-pro}
+p_s11_pro <- ggplot(df, aes(x = s11_avg, y = pro_avg_0_100)) +
+  geom_point(alpha = 0.25, size = 1) +
+  geom_smooth(method = "lm", se = TRUE, color = "#D1495B") +
+  labs(
+    title = "Odnos prosječnog SABER11 i SABER-PRO rezultata",
+    subtitle = "Svaka točka predstavlja jednog studenta",
+    x = "Prosjek SABER11 rezultata",
+    y = "Prosjek SABER-PRO rezultata 0-100"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_s11_pro)
+ggsave(file.path(OUTPUT_DIR, "02_saber11_vs_saberpro.png"), p_s11_pro, width = 9, height = 6, dpi = 150)
+
+cor_s11_pro <- cor(df$s11_avg, df$pro_avg_0_100, use = "complete.obs")
+cat("Korelacija između prosječnog SABER11 i SABER-PRO rezultata:", round(cor_s11_pro, 3), "\n")
+```
+
+# Korelacijska analiza
+
+```{r correlation-analysis}
+corr_vars <- c(score_vars, "PERCENTILE", "s11_avg", "pro_avg_0_100", "academic_index")
+corr_matrix <- cor(df %>% select(all_of(corr_vars)), use = "complete.obs")
+
+png(file.path(OUTPUT_DIR, "03_korelacijska_matrica.png"), width = 1100, height = 900, res = 130)
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = "black",
+  number.cex = 0.65,
+  tl.cex = 0.8,
+  tl.col = "black",
+  col = colorRampPalette(c("#D1495B", "white", "#2E86AB"))(200),
+  title = "Korelacijska matrica akademskih rezultata",
+  mar = c(0, 0, 2, 0)
+)
+dev.off()
+
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = "black",
+  number.cex = 0.65,
+  tl.cex = 0.8,
+  tl.col = "black",
+  col = colorRampPalette(c("#D1495B", "white", "#2E86AB"))(200),
+  title = "Korelacijska matrica akademskih rezultata",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+# Socioekonomski kontekst
+
+```{r stratum-percentile}
+df_stratum <- df %>%
+  filter(!is.na(STRATUM), !is.na(PERCENTILE))
+
+p_stratum <- ggplot(df_stratum, aes(x = STRATUM, y = PERCENTILE, fill = STRATUM)) +
+  geom_boxplot(alpha = 0.85, outlier.size = 0.5) +
+  scale_fill_brewer(palette = "RdYlGn") +
+  labs(
+    title = "Akademski percentil prema socioekonomskom stratumu",
+    subtitle = "Boxplot prikazuje razlike u distribuciji ukupnog akademskog percentila",
+    x = "Socioekonomski stratum",
+    y = "Percentil",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_stratum)
+ggsave(file.path(OUTPUT_DIR, "04_stratum_percentil.png"), p_stratum, width = 9, height = 6, dpi = 150)
+
+stratum_summary <- df_stratum %>%
+  group_by(STRATUM) %>%
+  summarise(
+    n = n(),
+    mean_percentile = round(mean(PERCENTILE, na.rm = TRUE), 1),
+    median_percentile = round(median(PERCENTILE, na.rm = TRUE), 1),
+    mean_academic_index = round(mean(academic_index, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+kable(stratum_summary, caption = "Akademski rezultati prema socioekonomskom stratumu")
+```
+
+```{r assets-context}
+if ("asset_count" %in% names(df)) {
+  p_assets <- ggplot(df, aes(x = asset_count, y = PERCENTILE)) +
+    geom_boxplot(aes(group = asset_count), fill = "#A7C957", alpha = 0.85, outlier.size = 0.4) +
+    labs(
+      title = "Broj dostupnih kućanskih resursa i akademski percentil",
+      subtitle = "Resursi uključuju internet, računalo, telefon, vozilo i slične indikatore",
+      x = "Broj dostupnih resursa",
+      y = "Percentil"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  print(p_assets)
+  ggsave(file.path(OUTPUT_DIR, "05_resursi_percentil.png"), p_assets, width = 9, height = 6, dpi = 150)
+}
+```
+
+# Analiza prema spolu i tipu škole
+
+```{r gender-school-analysis}
+gender_summary <- df %>%
+  group_by(GENDER) %>%
+  summarise(
+    n = n(),
+    s11_avg = round(mean(s11_avg, na.rm = TRUE), 1),
+    pro_avg = round(mean(pro_avg_0_100, na.rm = TRUE), 1),
+    percentile = round(mean(PERCENTILE, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+kable(gender_summary, caption = "Prosječni rezultati prema spolu")
+
+p_gender <- ggplot(df, aes(x = GENDER, y = PERCENTILE, fill = GENDER)) +
+  geom_boxplot(alpha = 0.85, outlier.size = 0.5) +
+  scale_fill_manual(values = c("#2E86AB", "#F18F01")) +
+  labs(
+    title = "Distribucija percentila prema spolu",
+    x = "Spol",
+    y = "Percentil",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_gender)
+ggsave(file.path(OUTPUT_DIR, "06_spol_percentil.png"), p_gender, width = 7, height = 5, dpi = 150)
+
+school_summary <- df %>%
+  filter(!is.na(SCHOOL_TYPE)) %>%
+  group_by(SCHOOL_TYPE) %>%
+  summarise(
+    n = n(),
+    s11_avg = round(mean(s11_avg, na.rm = TRUE), 1),
+    pro_avg = round(mean(pro_avg_0_100, na.rm = TRUE), 1),
+    percentile = round(mean(PERCENTILE, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(percentile))
+
+kable(school_summary, caption = "Prosječni rezultati prema tipu škole")
+```
+
+# PCA analiza
+
+PCA se koristi za sažimanje većeg broja akademskih varijabli u manji broj komponenti. Prije PCA analize podaci se standardiziraju jer varijable nisu potpuno na istoj skali, posebno `FEP_PRO` koji ide do 300.
+
+```{r pca-analysis}
+df_model <- df %>%
+  select(all_of(score_vars), PERCENTILE, GENDER, STRATUM, SCHOOL_TYPE, s11_avg, pro_avg_0_100, academic_index) %>%
+  drop_na(all_of(score_vars))
+
+pca_input <- df_model %>%
+  select(all_of(score_vars))
+
+pca_result <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+if (cor(pca_result$x[, 1], df_model$PERCENTILE, use = "complete.obs") < 0) {
+  pca_result$x[, 1] <- -pca_result$x[, 1]
+  pca_result$rotation[, 1] <- -pca_result$rotation[, 1]
+}
+
+pca_importance <- summary(pca_result)$importance
+pca_table <- as.data.frame(t(pca_importance)) %>%
+  rownames_to_column("komponenta") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+kable(head(pca_table, 8), caption = "Objašnjena varijanca PCA komponenti")
+
+cum_var <- pca_importance["Cumulative Proportion", ]
+n_pc <- which(cum_var >= 0.80)[1]
+cat("Broj komponenti potreban za objašnjenje barem 80% varijance:", n_pc, "\n")
+cat("PC1 objašnjava", round(pca_importance["Proportion of Variance", 1] * 100, 1), "% varijance.\n")
+```
+
+```{r pca-plots}
+p_scree <- fviz_eig(
+  pca_result,
+  addlabels = TRUE,
+  barfill = "#2E86AB",
+  barcolor = "white",
+  linecolor = "#D1495B"
+) +
+  labs(title = "Scree plot PCA komponenti") +
+  theme_minimal(base_size = 12)
+
+p_pca_var <- fviz_pca_var(
+  pca_result,
+  col.var = "contrib",
+  gradient.cols = c("#A7C7E7", "#2E86AB", "#D1495B"),
+  repel = TRUE
+) +
+  labs(title = "Doprinos akademskih varijabli PCA komponentama") +
+  theme_minimal(base_size = 12)
+
+print(p_scree)
+print(p_pca_var)
+
+ggsave(file.path(OUTPUT_DIR, "07_pca_scree.png"), p_scree, width = 8, height = 5, dpi = 150)
+ggsave(file.path(OUTPUT_DIR, "08_pca_varijable.png"), p_pca_var, width = 8, height = 6, dpi = 150)
+```
+
+# Odabir broja klastera
+
+K-means se provodi nad PCA komponentama, a ne nad sirovim varijablama. Time se smanjuje šum i izbjegava prevelik utjecaj visoko koreliranih varijabli.
+
+```{r cluster-number}
+pca_scores <- as.data.frame(pca_result$x[, 1:n_pc])
+
+set.seed(42)
+
+p_elbow <- fviz_nbclust(
+  pca_scores,
+  kmeans,
+  method = "wss",
+  k.max = 10,
+  nstart = 25
+) +
+  geom_vline(xintercept = 4, linetype = "dashed", color = "#D1495B") +
+  labs(
+    title = "Metoda lakta za odabir broja klastera",
+    subtitle = "Isprekidana linija označava interpretabilan izbor k = 4"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p_elbow)
+ggsave(file.path(OUTPUT_DIR, "09_elbow_kmeans.png"), p_elbow, width = 8, height = 5, dpi = 150)
+
+silhouette_sample <- pca_scores %>%
+  mutate(row_id = row_number()) %>%
+  slice_sample(n = min(3000, nrow(.))) %>%
+  select(-row_id)
+
+p_silhouette <- fviz_nbclust(
+  silhouette_sample,
+  kmeans,
+  method = "silhouette",
+  k.max = 10,
+  nstart = 25
+) +
+  labs(
+    title = "Silhouette metoda na uzorku podataka",
+    subtitle = "Koristi se uzorak radi bržeg izvođenja analize"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p_silhouette)
+ggsave(file.path(OUTPUT_DIR, "10_silhouette_kmeans.png"), p_silhouette, width = 8, height = 5, dpi = 150)
+```
+
+# K-means klaster analiza
+
+```{r kmeans-analysis}
+set.seed(42)
+k_selected <- 4
+
+km_result <- kmeans(
+  pca_scores,
+  centers = k_selected,
+  nstart = 25,
+  iter.max = 100
+)
+
+df_clustered_raw <- bind_cols(
+  df_model,
+  pca_scores %>% select(PC1, PC2),
+  tibble(cluster_raw = factor(km_result$cluster))
+)
+
+cluster_order <- df_clustered_raw %>%
+  group_by(cluster_raw) %>%
+  summarise(mean_percentile = mean(PERCENTILE, na.rm = TRUE), .groups = "drop") %>%
+  arrange(mean_percentile) %>%
+  mutate(
+    cluster_label = c(
+      "K1 - U riziku",
+      "K2 - Ispod prosjeka",
+      "K3 - Natprosječni",
+      "K4 - Izvrsni"
+    )
+  )
+
+df_clustered <- df_clustered_raw %>%
+  left_join(cluster_order, by = "cluster_raw") %>%
+  mutate(
+    cluster_label = factor(
+      cluster_label,
+      levels = c("K1 - U riziku", "K2 - Ispod prosjeka", "K3 - Natprosječni", "K4 - Izvrsni"),
+      ordered = TRUE
+    )
+  )
+
+cluster_profile <- df_clustered %>%
+  group_by(cluster_label) %>%
+  summarise(
+    n = n(),
+    s11_avg = round(mean(s11_avg, na.rm = TRUE), 1),
+    pro_avg = round(mean(pro_avg_0_100, na.rm = TRUE), 1),
+    percentile = round(mean(PERCENTILE, na.rm = TRUE), 1),
+    academic_index = round(mean(academic_index, na.rm = TRUE), 1),
+    mat_s11 = round(mean(MAT_S11, na.rm = TRUE), 1),
+    eng_s11 = round(mean(ENG_S11, na.rm = TRUE), 1),
+    qr_pro = round(mean(QR_PRO, na.rm = TRUE), 1),
+    eng_pro = round(mean(ENG_PRO, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+kable(cluster_profile, caption = "Profili studenata dobiveni k-means klasterizacijom")
+
+cat("BSS/TSS omjer:", round(km_result$betweenss / km_result$totss * 100, 1), "%\n")
+cat("Veličine klastera:", paste(km_result$size, collapse = " | "), "\n")
+```
+
+```{r cluster-pca-plot}
+p_clusters <- ggplot(df_clustered, aes(x = PC1, y = PC2, color = cluster_label)) +
+  geom_point(alpha = 0.35, size = 0.8) +
+  stat_ellipse(level = 0.80, linewidth = 1.1) +
+  scale_color_manual(values = c("#D1495B", "#F18F01", "#2A9D8F", "#2E86AB")) +
+  labs(
+    title = "K-means klasteri u PCA prostoru",
+    subtitle = "Klasteri su sortirani prema prosječnom ukupnom percentilu",
+    x = paste0("PC1 (", round(pca_importance["Proportion of Variance", 1] * 100, 1), "% varijance)"),
+    y = paste0("PC2 (", round(pca_importance["Proportion of Variance", 2] * 100, 1), "% varijance)"),
+    color = "Profil studenta"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_clusters)
+ggsave(file.path(OUTPUT_DIR, "11_klasteri_pca.png"), p_clusters, width = 10, height = 7, dpi = 150)
+```
+
+```{r cluster-profile-plot}
+cluster_profile_long <- cluster_profile %>%
+  select(cluster_label, s11_avg, pro_avg, percentile, academic_index) %>%
+  pivot_longer(-cluster_label, names_to = "metrika", values_to = "vrijednost") %>%
+  mutate(
+    metrika = recode(
+      metrika,
+      s11_avg = "SABER11 prosjek",
+      pro_avg = "SABER-PRO prosjek",
+      percentile = "Percentil",
+      academic_index = "Akademski indeks"
+    )
+  )
+
+p_profile <- ggplot(cluster_profile_long, aes(x = cluster_label, y = vrijednost, fill = cluster_label)) +
+  geom_col(alpha = 0.9) +
+  facet_wrap(~ metrika, ncol = 2) +
+  scale_fill_manual(values = c("#D1495B", "#F18F01", "#2A9D8F", "#2E86AB")) +
+  labs(
+    title = "Usporedba akademskih profila studenata",
+    x = "Klaster",
+    y = "Prosječna vrijednost",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_profile)
+ggsave(file.path(OUTPUT_DIR, "12_profili_klastera.png"), p_profile, width = 10, height = 7, dpi = 150)
+```
+
+```{r cluster-boxplots}
+df_box <- df_clustered %>%
+  select(cluster_label, MAT_S11, ENG_S11, QR_PRO, ENG_PRO, WC_PRO, PERCENTILE) %>%
+  pivot_longer(-cluster_label, names_to = "varijabla", values_to = "vrijednost") %>%
+  mutate(
+    varijabla = recode(
+      varijabla,
+      MAT_S11 = "Matematika\nSABER11",
+      ENG_S11 = "Engleski\nSABER11",
+      QR_PRO = "Kvantitativno\nSABER-PRO",
+      ENG_PRO = "Engleski\nSABER-PRO",
+      WC_PRO = "Pisanje\nSABER-PRO",
+      PERCENTILE = "Ukupni\npercentil"
+    )
+  )
+
+p_box <- ggplot(df_box, aes(x = cluster_label, y = vrijednost, fill = cluster_label)) +
+  geom_boxplot(alpha = 0.85, outlier.size = 0.4) +
+  facet_wrap(~ varijabla, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c("#D1495B", "#F18F01", "#2A9D8F", "#2E86AB")) +
+  labs(
+    title = "Distribucija ključnih rezultata po klasterima",
+    x = "Klaster",
+    y = "Vrijednost",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_box)
+ggsave(file.path(OUTPUT_DIR, "13_boxplot_klasteri.png"), p_box, width = 12, height = 7, dpi = 150)
+```
+
+# Dijagnostika klastera prema kontekstu
+
+```{r cluster-diagnostics}
+p_cluster_gender <- df_clustered %>%
+  filter(!is.na(GENDER)) %>%
+  count(cluster_label, GENDER) %>%
+  group_by(GENDER) %>%
+  mutate(udio = n / sum(n)) %>%
+  ggplot(aes(x = GENDER, y = udio, fill = cluster_label)) +
+  geom_col(position = "fill", alpha = 0.9) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = c("#D1495B", "#F18F01", "#2A9D8F", "#2E86AB")) +
+  labs(
+    title = "Udio klastera prema spolu",
+    x = "Spol",
+    y = "Udio",
+    fill = "Klaster"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_cluster_gender)
+ggsave(file.path(OUTPUT_DIR, "14_klasteri_spol.png"), p_cluster_gender, width = 8, height = 5, dpi = 150)
+
+p_cluster_stratum <- df_clustered %>%
+  filter(!is.na(STRATUM)) %>%
+  count(cluster_label, STRATUM) %>%
+  group_by(STRATUM) %>%
+  mutate(udio = n / sum(n)) %>%
+  ggplot(aes(x = STRATUM, y = udio, fill = cluster_label)) +
+  geom_col(position = "fill", alpha = 0.9) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = c("#D1495B", "#F18F01", "#2A9D8F", "#2E86AB")) +
+  labs(
+    title = "Udio klastera prema socioekonomskom stratumu",
+    x = "Stratum",
+    y = "Udio",
+    fill = "Klaster"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_cluster_stratum)
+ggsave(file.path(OUTPUT_DIR, "15_klasteri_stratum.png"), p_cluster_stratum, width = 10, height = 6, dpi = 150)
+```
+
+# Zaključak i preporuke za e-kolegij
+
+```{r conclusion, results='asis'}
+best_cluster <- cluster_profile %>% arrange(desc(percentile)) %>% slice(1)
+risk_cluster <- cluster_profile %>% arrange(percentile) %>% slice(1)
+
+cat("## Sažetak nalaza\n\n")
+cat("Analiza pokazuje da se akademski rezultati mogu smisleno grupirati u četiri profila studenata. ")
+cat("Najslabiji profil je ", as.character(risk_cluster$cluster_label), " s prosječnim percentilom ", risk_cluster$percentile, ", dok je najjači profil ", as.character(best_cluster$cluster_label), " s prosječnim percentilom ", best_cluster$percentile, ".\n\n", sep = "")
+
+cat("PCA analiza pokazuje da prva komponenta dominantno opisuje opće akademsko postignuće jer objedinjuje rezultate iz više predmeta. ")
+cat("K-means klasterizacija zatim omogućuje praktičnu segmentaciju studenata u skupine koje se mogu koristiti za personalizaciju e-kolegija.\n\n")
+
+cat("## Preporuke\n\n")
+cat("1. **Studenti u riziku** trebaju raniju intervenciju, dodatne materijale, kraće provjere znanja i češće povratne informacije.\n\n")
+cat("2. **Studenti ispod prosjeka** trebaju strukturirane vježbe, vođene primjere i jasne upute za nadoknadu slabijih područja.\n\n")
+cat("3. **Natprosječni studenti** mogu dobiti zahtjevnije zadatke, projektni rad i dodatne izazove.\n\n")
+cat("4. **Izvrsni studenti** mogu se uključiti kao mentori u peer-learning aktivnosti ili dobiti napredne zadatke.\n\n")
+cat("5. Pri dizajnu e-kolegija treba uzeti u obzir socioekonomski kontekst jer rezultati pokazuju razlike između stratuma i dostupnih resursa.\n\n")
+```
+
+# Spremljeni grafovi
+
+```{r saved-files}
+list.files(OUTPUT_DIR, pattern = "\\.png$", full.names = TRUE) %>%
+  tibble(datoteka = .) %>%
+```
+
+
+```{r saved-files}
+kable(caption = "Popis generiranih grafova")
+```
+---
+
+## Prednosti i nedostaci pristupa evaluacije vanjskim podacima
+
+### Prednosti
+
+Korištenje vanjskih, sekundarnih podataka omogućuje širi pogled na studente nego što ga pruža sam LMS. Dok LMS bilježi aktivnosti unutar e-kolegija, vanjski podaci poput SABER11/SABER-PRO rezultata daju uvid u predznanje, akademski razvoj i socioekonomski kontekst studenata.
+
+Takvi podaci mogu biti objektivniji od anketa zadovoljstva jer se temelje na standardiziranim ispitnim rezultatima, a ne na subjektivnim dojmovima. Socioekonomske varijable dodatno omogućuju prepoznavanje nejednakosti koje mogu utjecati na uspjeh studenata.
+
+Prednost je i mogućnost izrade studentskih profila pomoću klaster analize. Takvi profili mogu pomoći pri personalizaciji sadržaja, ranom prepoznavanju rizičnih skupina i boljem dizajnu podrške unutar e-kolegija.
+
+### Nedostaci
+
+Glavni nedostatak je ograničena primjenjivost podataka na drugi kontekst. SABER11/SABER-PRO dataset dolazi iz Kolumbije, pa se zaključci ne mogu izravno prenijeti na hrvatski obrazovni sustav bez opreza.
+
+Drugi problem je što vanjski podaci ne prikazuju stvarno ponašanje studenata unutar e-kolegija. Ne vidi se koliko vremena student provodi na aktivnostima, gdje zapinje ni kako reagira na sadržaj. Zato preporuke temeljene samo na vanjskim podacima ostaju djelomične.
+
+Dodatno, takvi podaci su statični. Ispitni rezultati prikazuju stanje u određenom trenutku, dok je učenje dinamičan proces. Zbog toga bi najbolji pristup bio kombinirati vanjske podatke s LMS podacima kako bi evaluacija bila preciznija i korisnija.

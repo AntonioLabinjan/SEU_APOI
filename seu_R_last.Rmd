@@ -127,7 +127,11 @@ df <- df %>%
 cat("Nakon čišćenja:", nrow(df), "studenata\n")
 cat("Broj missing vrijednosti u score varijablama:", sum(is.na(df[score_vars])), "\n")
 ```
+- Ovaj chunk definira varijable od interesa (ocjene s ispita Saber 11 i Saber Pro, kontekstualne i imovinske varijable), provjerava postoje li svi obavezni stupci u datasetu, te čisti podatke: standardizira tekstualne vrijednosti, pretvara ocjene u numerički format, faktorizira kategoričke varijable i izbacuje retke s nedostajućim vrijednostima u score varijablama.
 
+- Dodatno se računaju agregatne mjere: broj kućanskih dobara (asset_count), prosječne ocjene za oba ispita (s11_avg, pro_avg_0_100), skalirani globalni rezultat Saber Pro (pro_global_scaled) te kompozitni akademski indeks (academic_index) kao prosjek tih triju mjera. 
+
+- Rezultat je čist dataset od 12 411 studenata s 44 stupca i 0 nedostajućih vrijednosti u svim score varijablama, što potvrđuje da je dataset spreman za daljnju analizu.
 # Pregled dataseta
 
 ```{r data-overview}
@@ -154,6 +158,12 @@ overview <- tibble(
 
 kable(overview, caption = "Osnovni pregled dataseta")
 ```
+Dataset obuhvaća 12 411 studenata s 11 analiziranih akademskih varijabli
+Prosječne ocjene su slične za oba ispita (SABER11: 62.3, SABER-PRO: 64.0), što sugerira konzistentnu akademsku uspješnost
+Percentili pokrivaju cijeli raspon (1–100) s prosjekom od 68.4, što znači da studenti u uzorku teže prema gornjoj polovici distribucije, odnosno prolaze ispit.
+
+Prosječni student postiže 68.4 bodova
+Maksimalni postignut broj bodova je 100, odnosno postoje studenti koji su imali stopostotnu uspješnost. S druge strane, minimalni broj bodova je 1, odnosno postoje studenti koji su ostvarili izrazito loše rezultate. To je očekivano, i dodatno, pokazuje da je ispit očito validno sastavljen.
 
 # Deskriptivna statistika
 
@@ -182,7 +192,23 @@ cat("Prosječni rezultat iz SABER11 predmeta iznosi ", round(mean(df$s11_avg), 1
 cat("Prosječni SABER-PRO rezultat na skali 0-100 iznosi ", round(mean(df$pro_avg_0_100), 1), ". ", sep = "")
 cat("Prosječni percentil studenata iznosi ", round(mean(df$PERCENTILE), 1), ", što pokazuje da uzorak nije koncentriran samo oko slabijih rezultata.\n", sep = "")
 ```
+Deskriptivna statistika prikazuje osnovne mjere rasipanja i centralne tendencije za sve akademske varijable u uzorku.
 
+- MAT_S11 (matematika, SABER11): prosjek 64.3, niska standardna devijacija (11.9) – relativno homogena distribucija
+- CR_S11 (čitanje, SABER11): prosjek 60.8, ujednačena distribucija (SD = 10.0)
+- CC_S11 (građanske kompetencije, SABER11): minimum 0 – upozorava na moguće outliere; prosjek 60.7
+- BIO_S11 (biologija, SABER11): prosjek 64.0, najstabilnija SABER11 varijabla (SD = 11.2)
+- ENG_S11 (engleski, SABER11): najveća varijabilnost među S11 varijablama (SD = 14.3), prosjek 61.8
+- QR_PRO (kvantitativno rasuđivanje, PRO): najviši prosjek od svih varijabli (77.4), medijan čak 85 - pozitivno asimetrična distribucija
+- CR_PRO (kritičko čitanje, PRO): visoka varijabilnost (SD = 27.7), prosjek 62.2
+- CC_PRO (građanske kompetencije, PRO): najveća varijabilnost (SD = 29.0), prosjek 59.2
+- ENG_PRO (engleski, PRO): prosjek 67.5, umjerena varijabilnost (SD = 25.5)
+- WC_PRO (pisana komunikacija, PRO): najniži prosjek (53.7) i minimum 0 – najteža komponenta za studente
+- FEP_PRO (globalni rezultat): drugačija skala (1–300), prosjek 145.5, SD = 40.1 – potrebno skaliranje za usporedbu
+- PERCENTILE: prosjek 68.4, medijan 75 – studenti su uglavnom iznadprosječni u nacionalnoj distribuciji
+- s11_avg (prosječna ocjena S11): prosjek 62.3, SD = 9.6 – stabilan kompozitni indikator
+- pro_avg_0_100 (prosječna ocjena PRO): prosjek 64.0, ali visoka varijabilnost (SD = 19.5)
+- academic_index (kompozitni indeks): prosjek 58.2, SD = 11.6 – dobro centrirana mjera ukupne akademske uspješnosti
 # Distribucija rezultata
 
 ```{r score-distributions}
@@ -239,6 +265,10 @@ p_distribucije <- ggplot(df_long_scores, aes(x = rezultat, fill = ispit)) +
 print(p_distribucije)
 ggsave(file.path(OUTPUT_DIR, "01_distribucije_rezultata.png"), p_distribucije, width = 14, height = 7, dpi = 150)
 ```
+- SABER11 distribucije (narančasto) su konzistentno zvonaste i simetričnije, s jasno definiranim vrhovima oko 50–70, što ukazuje na homogeniju populaciju srednjoškolaca
+- SABER-PRO distribucije (plavo) su izrazito ljevostrano asimetrične – većina studenata gomila se pri višim vrijednostima, posebno vidljivo kod Kvantitativnog rasuđivanja gdje dominira vrh blizu 100
+- Pisanje (WC_PRO) jedina je PRO varijabla s ravnomjernijom, raspršenijom distribucijom – konzistentno s najnižim prosjekom (53.7) iz deskriptivne statistike
+- Općenito, prijelaz iz srednje škole na sveučilište prati pomak prema višim rezultatima uz veću varijabilnost, što sugerira da sveučilišni ispit bolje diferencira studente na gornjem kraju distribucije
 
 # Usporedba srednjoškolskog i sveučilišnog uspjeha
 
@@ -261,6 +291,9 @@ ggsave(file.path(OUTPUT_DIR, "02_saber11_vs_saberpro.png"), p_s11_pro, width = 9
 cor_s11_pro <- cor(df$s11_avg, df$pro_avg_0_100, use = "complete.obs")
 cat("Korelacija između prosječnog SABER11 i SABER-PRO rezultata:", round(cor_s11_pro, 3), "\n")
 ```
+- Pearsonova korelacija od r = 0.772 ukazuje na jaku pozitivnu vezu između prosječnih rezultata SABER11 i SABER-PRO ispita
+- Scatter plot potvrđuje ovaj nalaz - oblak točaka jasno prati linearni trend (crvena linija), što znači da studenti koji su bolje završili srednju školu tendencijski postižu bolje rezultate i na sveučilišnom ispitu
+- Ipak, vidljiva je značajna varijabilnost oko regresijskog pravca, što sugerira da SABER11 nije jedini prediktor uspjeha - dio varijance objašnjavaju drugi faktori (socioekonomski status, tip škole, smjer studija i sl.)
 
 # Korelacijska analiza
 
@@ -298,6 +331,10 @@ corrplot(
   mar = c(0, 0, 2, 0)
 )
 ```
+- PERCENTILE i pro_avg_0_100 imaju iznimno visoku korelaciju (r = 0.97), što znači da percentilni rang gotovo savršeno prati prosječni PRO rezultat - radi se zapravo o istoj informaciji u drugačijoj skali
+- Unutar SABER11 varijabli korelacije su visoke (npr. MAT_S11 i BIO_S11: r = 0.87), što sugerira postojanje zajedničkog faktora opće akademske sposobnosti
+- Između SABER11 i SABER-PRO korelacije su umjerene (0.43–0.59), potvrđujući raniji nalaz da srednja škola predviđa, ali ne determinira sveučilišni uspjeh
+- WC_PRO i FEP_PRO su najslabije povezane s ostalim varijablama (r ≈ 0.16–0.35), što ukazuje da pisana komunikacija i globalni PRO rezultat mjere nešto drugačije od ostalih komponenti
 
 # Socioekonomski kontekst
 
@@ -336,6 +373,10 @@ stratum_summary <- df_stratum %>%
 
 kable(stratum_summary, caption = "Akademski rezultati prema socioekonomskom stratumu")
 ```
+Postoji jasan porast akademskih rezultata s porastom socioekonomskog stratuma - od prosječnog percentila 57.0 (Stratum 1) do 85.8 (Stratum 6)
+Stratum 1 i 2 imaju najšire boxplotove, što znači veću varijabilnost unutar nižih klasa - neki studenti iz siromašnijih obitelji postižu visoke rezultate, ali prosjek značajno zaostaje
+Stratum 5 i 6 su kompaktnije distribucije s medijanima oko 90–93, uz manji IQR - viši socioekeonomski status konzistentnije producira visoke rezultate
+Nalaz jasno ukazuje na reprodukciju socioekonomskih nejednakosti kroz obrazovni sustav - socioekonomski je snažan prediktor akademskog uspjeha
 
 ```{r assets-context}
 if ("asset_count" %in% names(df)) {
@@ -354,7 +395,8 @@ if ("asset_count" %in% names(df)) {
   ggsave(file.path(OUTPUT_DIR, "05_resursi_percentil.png"), p_assets, width = 9, height = 6, dpi = 150)
 }
 ```
-
+Studenti s više dostupnih kućanskih resursa (7–10) tendencijski postižu više percentile, s medijanima koji rastu prema gornjem kraju distribucije
+Međutim, veza nije strogo linearna - boxplotovi za niže vrijednosti resursa (0–5) su međusobno slični, što sugerira da tek veći broj resursa (7+) donosi zamjetniju prednost
 # Analiza prema spolu i tipu škole
 
 ```{r gender-school-analysis}
@@ -402,6 +444,9 @@ school_summary <- df %>%
 
 kable(school_summary, caption = "Prosječni rezultati prema tipu škole")
 ```
+- Razlike između spolova su minimalne - muškarci postižu neznatno viši prosječni percentil (69.3 vs 67.1), no boxplotovi su gotovo identični po rasponu i medijanu, što sugerira da spol nije značajan prediktor akademskog uspjeha u ovom uzorku
+- Tip škole pokazuje jasniju diferencijaciju - studenti iz akademskih škola postižu znatno viši percentil (71.7) u odnosu na tehničke (62.4), što upućuje da vrsta srednjoškolskog obrazovanja ima vidljiv utjecaj na kasniji akademski uspjeh
+- Zanimljivo je da TECHNICAL/ACADEMIC i TECHNICAL škole postižu gotovo identične rezultate, što sugerira da je tehničko obrazovanje kao takvo povezano s nižim sveučilišnim ispitnima rezultatima bez obzira na akademsku komponentu
 
 # PCA analiza
 
@@ -434,6 +479,9 @@ n_pc <- which(cum_var >= 0.80)[1]
 cat("Broj komponenti potreban za objašnjenje barem 80% varijance:", n_pc, "\n")
 cat("PC1 objašnjava", round(pca_importance["Proportion of Variance", 1] * 100, 1), "% varijance.\n")
 ```
+PCA se provodi nad 11 akademskih varijabli s ciljem redukcije dimenzionalnosti - PC1 dominantno opisuje opće akademsko postignuće i sam objašnjava čak 52.5% ukupne varijance, što potvrđuje postojanje snažnog zajedničkog faktora koji prožima sve ispitne rezultate
+Preostalih komponenti doprinose znatno manje (PC2: 8.7%, PC3: 8.0%...), a za objašnjenje barem 80% varijance potrebno je 5 komponenti (kumulativno 81.1%)
+Ovakva struktura sugerira da je akademska uspješnost u velikoj mjeri jednodimenzionalni konstrukt - studenti koji su dobri u jednom predmetu tendencijski su dobri i u ostalima, što opravdava korištenje kompozitnog akademskog indeksa u daljnjoj analizi
 
 ```{r pca-plots}
 p_scree <- fviz_eig(
@@ -509,6 +557,9 @@ p_silhouette <- fviz_nbclust(
 print(p_silhouette)
 ggsave(file.path(OUTPUT_DIR, "10_silhouette_kmeans.png"), p_silhouette, width = 8, height = 5, dpi = 150)
 ```
+- Metoda lakta sugerira da se dodavanjem klastera nakon k=4 sve manje dobiva na kvaliteti grupiranja - krivulja se tu primjetno "izravna"
+- Silhouette metoda preferira k=2, što bi značilo samo dvije grupe studenata - previše grubo za ikakvu smislenu primjenu
+- Zbog toga je odabrano k=4 kao praktičan kompromis - četiri profila su dovoljno specifična da pomognu u prilagodbi nastave, a i intuitivno ima smisla razlikovati studente u riziku, prosječne, natprosječne i izvrsne
 
 # K-means klaster analiza
 
@@ -572,7 +623,8 @@ kable(cluster_profile, caption = "Profili studenata dobiveni k-means klasterizac
 cat("BSS/TSS omjer:", round(km_result$betweenss / km_result$totss * 100, 1), "%\n")
 cat("Veličine klastera:", paste(km_result$size, collapse = " | "), "\n")
 ```
-
+K-means je podijelio 12 411 studenata u četiri jasno odvojene grupe - od K1 (u riziku, percentil 35.5) do K4 (izvrsni, percentil 92.7), s konzistentnim rastom kroz sve mjere (S11, PRO, akademski indeks)
+Zanimljivo je da je K3 (natprosječni) najmanji klaster (n=1421), dok su ostali relativno ujednačeni (~3000-4400).
 ```{r cluster-pca-plot}
 p_clusters <- ggplot(df_clustered, aes(x = PC1, y = PC2, color = cluster_label)) +
   geom_point(alpha = 0.35, size = 0.8) +
@@ -629,6 +681,9 @@ p_profile <- ggplot(cluster_profile_long, aes(x = cluster_label, y = vrijednost,
 print(p_profile)
 ggsave(file.path(OUTPUT_DIR, "12_profili_klastera.png"), p_profile, width = 10, height = 7, dpi = 150)
 ```
+Grafikon vizualno potvrđuje ono što tablica pokazuje - sve četiri metrike rastu monotono od K1 do K4, bez iznimaka, što govori da su klasteri interno konzistentni i dobro diferencirani
+Najdramatičnija razlika vidljiva je u percentilu - K1 studenti su na 35.5, a K4 na 92.7, dakle gotovo 60 percentilnih bodova razlike između najslabije i najjače grupe
+Zanimljivo je da K3 (natprosječni) i K2 (ispod prosjeka) nisu toliko daleko jedni od drugih po SABER11 prosjeku (65.8 vs 60.5), ali se jasnije razdvajaju na SABER-PRO i percentilu - što sugerira da sveučilišni ispit bolje razlikuje ove dvije grupe nego srednjoškolski
 
 ```{r cluster-boxplots}
 df_box <- df_clustered %>%
@@ -666,6 +721,9 @@ p_box <- ggplot(df_box, aes(x = cluster_label, y = vrijednost, fill = cluster_la
 print(p_box)
 ggsave(file.path(OUTPUT_DIR, "13_boxplot_klasteri.png"), p_box, width = 12, height = 7, dpi = 150)
 ```
+Boxplotovi potvrđuju da su klasteri konzistentni kroz sve predmete - K1 je dosljedno najniži, K4 najviši, bez izuzetaka ni u jednoj varijabli
+K1 (u riziku) ima najšire boxplotove, posebno na PRO varijablama - velika unutarnja varijabilnost govori da ova grupa nije homogena, nego da obuhvaća studente s vrlo različitim profilima slabosti
+Pisanje (WC_PRO) jedina je varijabla gdje se K2, K3 i K4 značajno preklapaju, što sugerira da pisana komunikacija jednako muči i prosječne i natprosječne studente –-potencijalno područje za intervenciju u e-kolegiju za sve grupe
 
 # Dijagnostika klastera prema kontekstu
 
@@ -715,6 +773,9 @@ p_cluster_stratum <- df_clustered %>%
 print(p_cluster_stratum)
 ggsave(file.path(OUTPUT_DIR, "15_klasteri_stratum.png"), p_cluster_stratum, width = 10, height = 6, dpi = 150)
 ```
+Prema spolu razlike su minimalne - distribucija klastera gotovo je identična kod muškaraca i žena, što potvrđuje raniji nalaz da spol nije značajan faktor akademskog uspjeha u ovom uzorku
+Prema stratumu slika je dramatično drugačija - u Stratumu 1 dominiraju K1 i K2 (slabiji studenti), dok u Stratumu 5 i 6 K4 (izvrsni) čini više od polovice svih studenata, što je još jedan snažan dokaz veze između socioekonomskog porijekla i akademskog ishoda
+Posebno upada u oči gotovo potpuni nestanak K1 (u riziku) u višim stratumima - studenti iz bogatijih obitelji jednostavno rijetko završavaju u najslabijoj grupi, dok je to u Stratumu 1 gotovo svaki drugi student
 
 # Zaključak i preporuke za e-kolegij
 
@@ -722,32 +783,27 @@ ggsave(file.path(OUTPUT_DIR, "15_klasteri_stratum.png"), p_cluster_stratum, widt
 best_cluster <- cluster_profile %>% arrange(desc(percentile)) %>% slice(1)
 risk_cluster <- cluster_profile %>% arrange(percentile) %>% slice(1)
 
-cat("## Sažetak nalaza\n\n")
+cat("## Sažetak nalaza")
 cat("Analiza pokazuje da se akademski rezultati mogu smisleno grupirati u četiri profila studenata. ")
 cat("Najslabiji profil je ", as.character(risk_cluster$cluster_label), " s prosječnim percentilom ", risk_cluster$percentile, ", dok je najjači profil ", as.character(best_cluster$cluster_label), " s prosječnim percentilom ", best_cluster$percentile, ".\n\n", sep = "")
 
 cat("PCA analiza pokazuje da prva komponenta dominantno opisuje opće akademsko postignuće jer objedinjuje rezultate iz više predmeta. ")
-cat("K-means klasterizacija zatim omogućuje praktičnu segmentaciju studenata u skupine koje se mogu koristiti za personalizaciju e-kolegija.\n\n")
+cat("K-means klasterizacija zatim omogućuje praktičnu segmentaciju studenata u skupine koje se mogu koristiti za personalizaciju e-kolegija.")
 
-cat("## Preporuke\n\n")
-cat("1. **Studenti u riziku** trebaju raniju intervenciju, dodatne materijale, kraće provjere znanja i češće povratne informacije.\n\n")
-cat("2. **Studenti ispod prosjeka** trebaju strukturirane vježbe, vođene primjere i jasne upute za nadoknadu slabijih područja.\n\n")
-cat("3. **Natprosječni studenti** mogu dobiti zahtjevnije zadatke, projektni rad i dodatne izazove.\n\n")
-cat("4. **Izvrsni studenti** mogu se uključiti kao mentori u peer-learning aktivnosti ili dobiti napredne zadatke.\n\n")
-cat("5. Pri dizajnu e-kolegija treba uzeti u obzir socioekonomski kontekst jer rezultati pokazuju razlike između stratuma i dostupnih resursa.\n\n")
+cat("Preporuke")
+cat("\n")
+cat("1. Studenti u riziku trebaju raniju intervenciju, dodatne materijale, kraće provjere znanja i češće povratne informacije.")
+cat("\n")
+cat("2. Studenti ispod prosjeka trebaju strukturirane vježbe, vođene primjere i jasne upute za nadoknadu slabijih područja.")
+cat("\n")
+cat("3. Natprosječni studenti mogu dobiti zahtjevnije zadatke, projektni rad i dodatne izazove.")
+cat("\n")
+cat("4. Izvrsni studenti mogu se uključiti kao mentori u peer-learning aktivnosti ili dobiti napredne zadatke.")
+cat("\n")
+cat("5. Pri dizajnu e-kolegija treba uzeti u obzir socioekonomski kontekst jer rezultati pokazuju razlike između stratuma i dostupnih resursa.")
 ```
 
-# Spremljeni grafovi
 
-```{r saved-files}
-list.files(OUTPUT_DIR, pattern = "\\.png$", full.names = TRUE) %>%
-  tibble(datoteka = .) %>%
-```
-
-
-```{r saved-files}
-kable(caption = "Popis generiranih grafova")
-```
 ---
 
 ## Prednosti i nedostaci pristupa evaluacije vanjskim podacima
